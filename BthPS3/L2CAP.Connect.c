@@ -36,8 +36,44 @@
 
 
 #include "Driver.h"
+#include <ntstrsafe.h>
 #include "L2CAP.Connect.tmh"
 #include "BthPS3ETW.h"
+
+//
+// Some DualShock 3 clones advertise the Bluetooth name "Pro Controller", which
+// is also the name of the Nintendo Switch Pro Controller. The name alone is
+// therefore ambiguous and is only trusted in combination with the clone's
+// Bluetooth address prefix (OUI, the upper 24 bits of the 48-bit address).
+// 
+#define BTHPS3_CLONE_SIXAXIS_NAME   L"Pro Controller"
+#define BTHPS3_CLONE_SIXAXIS_OUI    0xA05A5CULL
+
+_IRQL_requires_max_(PASSIVE_LEVEL)
+static BOOLEAN
+BthPS3_IsKnownSixaxisClone(
+    _In_ BTH_ADDR BtAddress,
+    _In_ PCHAR RemoteName
+)
+{
+    DECLARE_CONST_UNICODE_STRING(expected, BTHPS3_CLONE_SIXAXIS_NAME);
+    DECLARE_UNICODE_STRING_SIZE(name, BTH_MAX_NAME_SIZE);
+
+    if (((BtAddress >> 24) & 0xFFFFFFULL) != BTHPS3_CLONE_SIXAXIS_OUI)
+    {
+        return FALSE;
+    }
+
+    if (!NT_SUCCESS(RtlUnicodeStringPrintf(&name, L"%hs", RemoteName)))
+    {
+        return FALSE;
+    }
+
+    //
+    // Case-insensitive, consistent with StringUtil_BthNameIsEqual
+    // 
+    return RtlEqualUnicodeString(&name, &expected, TRUE);
+}
 
  //
  // Incoming connection request, prepare and send response
@@ -210,6 +246,24 @@ L2CAP_PS3_HandleRemoteConnect(
             EventWriteRemoteDeviceIdentified(NULL, ConnectParams->BtAddress, L"WIRELESS");
 
             goto deviceIdentified;
+        }
+
+        //
+        // Last resort: known DualShock 3 clone (name AND address prefix match).
+        // Only reached if none of the lists above matched.
+        // 
+        if (DevCtx->Settings.IsSIXAXISSupported
+            && BthPS3_IsKnownSixaxisClone(ConnectParams->BtAddress, remoteName))
+        {
+            deviceType = DS_DEVICE_TYPE_SIXAXIS;
+
+            TraceInformation(
+                TRACE_L2CAP,
+                "Device %012llX identified as SIXAXIS compatible (known clone)",
+                ConnectParams->BtAddress
+            );
+
+            EventWriteRemoteDeviceIdentified(NULL, ConnectParams->BtAddress, L"SIXAXIS");
         }
 
     deviceIdentified:
